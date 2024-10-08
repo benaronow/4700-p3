@@ -7,6 +7,8 @@ class Router:
     relations = {}
     sockets = {}
     ports = {}
+    neighbors = []
+    forwarding_table = {}
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
@@ -14,9 +16,11 @@ class Router:
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
 
+            self.neighbors.append(neighbor)
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sockets[neighbor].bind(('localhost', 0))
             self.ports[neighbor] = int(port)
+            self.forwarding_table[neighbor] = int(port)
             self.relations[neighbor] = relation
             self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
 
@@ -28,7 +32,15 @@ class Router:
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
+    def maskNetwork(self, to_mask, mask):
+        srcArr = [int(octet) for octet in to_mask.split('.')]
+        maskArr = [int(octet) for octet in mask.split('.')]
+        networkArr = [src & mask for src, mask in zip(srcArr, maskArr)]
+        return '.'.join(map(str, networkArr))
+
     def run(self):
+        announcements = []
+        forwarding_table = {}
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
             for conn in socks:
@@ -40,7 +52,32 @@ class Router:
                         break
                 msg = k.decode('utf-8')
 
-                print("Received message '%s' from %s" % (msg, srcif))
+                msg_json = json.loads(msg)
+                msg_type = msg_json["type"]
+                
+                if msg_type == 'handshake':
+                    forwarding_table[msg_json['src']] = msg_json['dst']
+                    
+                if msg_type == 'update':
+                    netmask = msg_json['msg']['netmask']
+                    ASPath = 
+                    announcements.append(msg)
+                    #forwarding_table[msg_json['dest']] = msg_json['src']
+                    print(" FORWARDING TABLEEEEEEEEE:", str(forwarding_table))
+                    for neighbor in self.neighbors:
+                        if neighbor != msg_json['src']:
+                            self.send(neighbor, json.dumps(
+                                { "type": "update", "src": self.our_addr(neighbor), "dst": neighbor,
+                                "msg": {'netmask': msg_json['msg']['netmask'], 'ASPath': [14, msg_json['msg']['ASPath'][0]],
+                                        'network': self.maskNetwork(
+                                            msg_json['src'],
+                                            msg_json['msg']['netmask'])}  }))
+                    #Your announcement should only include the network, netmask, and ASPath.
+                    
+                # elif (msg_type == 'data'):
+                #     print(msg_type)
+
+                print("Received message '%s' from %s" % (msg_json, srcif))
         return
 
 if __name__ == "__main__":
