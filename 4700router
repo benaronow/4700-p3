@@ -57,12 +57,10 @@ class Router:
                 
                 if msg_type == 'handshake':
                     forwarding_table[msg_json['src']] = msg_json['dst']
-                    
                 if msg_type == 'update':
                     netmask = msg_json['msg']['netmask']
-                    ASPath = 
+                    #ASPath = 
                     announcements.append(msg)
-                    #forwarding_table[msg_json['dest']] = msg_json['src']
                     print(" FORWARDING TABLEEEEEEEEE:", str(forwarding_table))
                     for neighbor in self.neighbors:
                         if neighbor != msg_json['src']:
@@ -72,8 +70,19 @@ class Router:
                                         'network': self.maskNetwork(
                                             msg_json['src'],
                                             msg_json['msg']['netmask'])}  }))
+                    forwarding_table[msg_json['src']] = msg_json['dst']
                     #Your announcement should only include the network, netmask, and ASPath.
-                    
+                if msg_type == 'data':
+                    if msg_json['src'] in forwarding_table:
+                        self.send(forwarding_table[msg_json['src']], json.dumps(
+                            { "type": "data", "src": self.our_addr(forwarding_table[msg_json['src']]), "dst": forwarding_table[msg_json['src']]}))
+                    else:
+                        for neighbor in self.neighbors:
+                            print(str({"src": self.our_addr(neighbor), "dst": neighbor, "type": "no route", "msg": {}}))
+                            if neighbor != msg_json['src']:
+                                self.send(neighbor, json.dumps({"type": "no route",
+                                                               "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}}))
+                    forwarding_table[msg_json['src']] = msg_json['dst']
                 # elif (msg_type == 'data'):
                 #     print(msg_type)
 
