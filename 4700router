@@ -77,11 +77,9 @@ class Router:
                         self.send(forwarding_table[msg_json['src']], json.dumps(
                             { "type": "data", "src": self.our_addr(forwarding_table[msg_json['src']]), "dst": forwarding_table[msg_json['src']]}))
                     else:
-                        for neighbor in self.neighbors:
-                            print(str({"src": self.our_addr(neighbor), "dst": neighbor, "type": "no route", "msg": {}}))
-                            if neighbor != msg_json['src']:
-                                self.send(neighbor, json.dumps({"type": "no route",
-                                                               "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}}))
+                        
+                        self.send(SEND IT TO THE NEIGHBOR/SOCKET THAT RECEIVED THIS DATA MESSAGE FROM, json.dumps(
+                            { "type": "no route", "src": msg_json['src'], "dst": msg_json['dst']}))
                     forwarding_table[msg_json['src']] = msg_json['dst']
                 # elif (msg_type == 'data'):
                 #     print(msg_type)
