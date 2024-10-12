@@ -37,7 +37,7 @@ class Router:
         #self.fowarding_table[msg_json['src']] = msg_json['dst']
 
     def handle_update(self, msg, msg_json):
-        update_from = msg_json['src']
+        src = msg_json['src']
         network = msg_json['msg']['network']
         netmask = msg_json['msg']['netmask']
         ASPath = [args.asn] + msg_json['msg']['ASPath']
@@ -46,7 +46,7 @@ class Router:
         self.forwarding_table.append({
             'network': network,
             'netmask': netmask,
-            'peer': update_from,
+            'peer': src,
             'localpref': msg_json['msg']['localpref'],
             'selfOrigin': msg_json['msg']['selfOrigin'],
             'ASPath': msg_json['msg']['ASPath'],
@@ -54,12 +54,25 @@ class Router:
         })
 
         for neighbor in self.neighbors:
-            if neighbor != update_from:
+            if neighbor != src:
                 self.send(neighbor, json.dumps({ 'type': 'update', 'src': self.our_addr(neighbor), 'dst': neighbor,
                 "msg": { 'netmask': netmask, 'ASPath': ASPath, 'network': network } }))
     
-    def handle_withdraw(self):
-        return self
+    def handle_withdraw(self, msg, msg_json):
+        src = msg_json['src']
+        routes_to_remove = msg_json['msg']
+        
+        self.announcements.append(msg)
+        
+        for entry in self.forwarding_table:
+            for route in routes_to_remove:
+                if (entry['peer'] == src) & (entry['network'] == route['network']) & (entry['netmask'] == route['netmask']):
+                    self.forwarding_table.remove(entry)
+                    
+        for neighbor in self.neighbors:
+            if neighbor != src:
+                self.send(neighbor, json.dumps({ 'type': 'withdraw', 'src': self.our_addr(neighbor), 'dst': neighbor,
+                "msg": routes_to_remove }))
     
     def mask_network(self, to_mask, mask):
         srcArr = [int(octet) for octet in to_mask.split('.')]
@@ -143,7 +156,7 @@ class Router:
             self.break_tie((forward_options if len(new_forward_options) == 0 else new_forward_options),
                            src, dst, msg, self.next_get_func(get_func))
         
-    def handle_data(self, msg_json):
+    def handle_data(self, msg_json, srcif):
         src = msg_json['src']
         dst = msg_json['dst']
         msg = msg_json['msg']
@@ -154,7 +167,7 @@ class Router:
                 forward_options.append(entry)
         
         if len(forward_options) == 0:
-            self.send(src, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
+            self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
         elif len(forward_options) == 1:
             self.send(forward_options[0]['peer'], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
         else:
@@ -192,9 +205,9 @@ class Router:
                 if msg_type == 'update':
                     self.handle_update(msg, msg_json)
                 if msg_type == 'withdraw':
-                    self.handle_withdraw()
+                    self.handle_withdraw(msg, msg_json)
                 if msg_type == 'data':
-                    self.handle_data(msg_json)
+                    self.handle_data(msg_json, srcif)
                 if msg_type == 'dump':
                     self.handle_dump(msg_json)
         
