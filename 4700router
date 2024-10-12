@@ -134,15 +134,13 @@ class Router:
         if get_func == self.get_min_ASPath: return self.get_best_origin
         if get_func == self.get_best_origin: return self.get_min_src
     
-    def send_data(self, forward_options, src, dst, msg, get_func):
-        print(get_func)
+    def break_tie(self, forward_options, src, dst, msg, get_func):
         new_forward_options = get_func(forward_options)
         
         if len(new_forward_options) == 1:
             self.send(new_forward_options[0]['peer'], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
         else:
-            print('reached next')
-            self.send_data((forward_options if len(new_forward_options) == 0 else new_forward_options),
+            self.break_tie((forward_options if len(new_forward_options) == 0 else new_forward_options),
                            src, dst, msg, self.next_get_func(get_func))
         
     def handle_data(self, msg_json):
@@ -160,7 +158,7 @@ class Router:
         elif len(forward_options) == 1:
             self.send(forward_options[0]['peer'], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
         else:
-            self.send_data(forward_options, src, dst, msg, self.get_max_localpref)
+            self.break_tie(forward_options, src, dst, msg, self.get_max_localpref)
                 
     def handle_dump(self, msg_json):
         dst = msg_json['src']
