@@ -33,20 +33,14 @@ class Router:
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
-    def maskNetwork(self, to_mask, mask):
-        srcArr = [int(octet) for octet in to_mask.split('.')]
-        maskArr = [int(octet) for octet in mask.split('.')]
-        networkArr = [src & mask for src, mask in zip(srcArr, maskArr)]
-        return '.'.join(map(str, networkArr))
-
-    #def handleHandshake(msg_json, fowarding_table):
+    #def handle_handshake(msg_json, fowarding_table):
         #self.fowarding_table[msg_json['src']] = msg_json['dst']
 
-    def handleUpdate(self, msg, msg_json):
+    def handle_update(self, msg, msg_json):
         update_from = msg_json['src']
         network = msg_json['msg']['network']
         netmask = msg_json['msg']['netmask']
-        ASPath = [args.asn, msg_json['msg']['ASPath'][0]]
+        ASPath = [args.asn] + msg_json['msg']['ASPath']
 
         self.announcements.append(msg)
         self.forwarding_table.append({
@@ -64,25 +58,111 @@ class Router:
                 self.send(neighbor, json.dumps({ 'type': 'update', 'src': self.our_addr(neighbor), 'dst': neighbor,
                 "msg": { 'netmask': netmask, 'ASPath': ASPath, 'network': network } }))
     
-    def handleWithdraw(self):
+    def handle_withdraw(self):
         return self
-
-    def handleData(self, msg_json):
+    
+    def mask_network(self, to_mask, mask):
+        srcArr = [int(octet) for octet in to_mask.split('.')]
+        maskArr = [int(octet) for octet in mask.split('.')]
+        networkArr = [src & mask for src, mask in zip(srcArr, maskArr)]
+        return '.'.join(map(str, networkArr))
+    
+    def get_max_localpref(self, forward_options):
+        max_localpref = 0
+        max_options = []
+        for option in forward_options:
+            if option['localpref'] > max_localpref:
+                max_localpref = option['localpref']
+                max_options = [option]
+            elif option['localpref'] == max_localpref:
+                max_options.append(option)
+        
+        return max_options
+    
+    def get_true_selfOrigin(self, forward_options):
+        true_options = []
+        for option in forward_options:
+            if option['selfOrigin']:
+                true_options.append(option)
+        
+        return true_options
+    
+    def get_min_ASPath(self, forward_options):
+        min_ASPath = float('inf')
+        min_options = []
+        for option in forward_options:
+            if len(option['ASPath']) < min_ASPath:
+                min_ASPath = len(option['ASPath'])
+                min_options = [option]
+            elif len(option['ASPath']) == min_ASPath:
+                min_options.append(option)
+                
+        return min_options
+    
+    def origin_to_num(self, origin):
+        if origin == 'IGP': return 3
+        if origin == 'EGP': return 2
+        if origin == 'UNK': return 1
+    
+    def get_best_origin(self, forward_options):
+        best_origin = 0
+        best_options = []
+        for option in forward_options:
+            if self.origin_to_num(option['origin']) > best_origin:
+                best_origin = self.origin_to_num(option['origin'])
+                best_options = [option]
+            elif self.origin_to_num(option['origin']) == best_origin:
+                best_options.append(option)
+                
+        return best_options
+    
+    def get_min_src(self, forward_options):
+        min_src = float('inf')
+        min_options = []
+        for option in forward_options:
+            if float(''.join(option['peer'].split('.'))) < min_src:
+                min_src = int(''.join(option['peer'].split('.')))
+                min_options = [option]
+            elif float(''.join(option['peer'].split('.'))) == min_src:
+                min_options.append(option)
+                
+        return min_options
+    
+    def next_get_func(self, get_func):
+        if get_func == self.get_max_localpref: return self.get_true_selfOrigin
+        if get_func == self.get_true_selfOrigin: return self.get_min_ASPath
+        if get_func == self.get_min_ASPath: return self.get_best_origin
+        if get_func == self.get_best_origin: return self.get_min_src
+    
+    def send_data(self, forward_options, src, dst, msg, get_func):
+        print(get_func)
+        new_forward_options = get_func(forward_options)
+        
+        if len(new_forward_options) == 1:
+            self.send(new_forward_options[0]['peer'], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
+        else:
+            print('reached next')
+            self.send_data((forward_options if len(new_forward_options) == 0 else new_forward_options),
+                           src, dst, msg, self.next_get_func(get_func))
+        
+    def handle_data(self, msg_json):
         src = msg_json['src']
         dst = msg_json['dst']
         msg = msg_json['msg']
 
         forward_options = []
         for entry in self.forwarding_table:
-            if entry['network'] == self.maskNetwork(dst, entry['netmask']):
-                forward_options.append(entry['peer'])
+            if entry['network'] == self.mask_network(dst, entry['netmask']):
+                forward_options.append(entry)
         
         if len(forward_options) == 0:
             self.send(src, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
-        if len(forward_options) == 1:
-            self.send(forward_options[0], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
-
-    def handleDump(self, msg_json):
+        elif len(forward_options) == 1:
+            self.send(forward_options[0]['peer'], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
+        else:
+            self.send_data(forward_options, src, dst, msg, self.get_max_localpref)
+                
+    def handle_dump(self, msg_json):
         dst = msg_json['src']
         src = self.our_addr(dst)
         msg = []
@@ -110,15 +190,15 @@ class Router:
                 msg_type = msg_json["type"]
                 
                 # if msg_type == 'handshake':
-                    # self.handleHandshake(msg_json)
+                    # self.handle_handshake(msg_json)
                 if msg_type == 'update':
-                    self.handleUpdate(msg, msg_json)
+                    self.handle_update(msg, msg_json)
                 if msg_type == 'withdraw':
-                    self.handleWithdraw()
+                    self.handle_withdraw()
                 if msg_type == 'data':
-                    self.handleData(msg_json)
+                    self.handle_data(msg_json)
                 if msg_type == 'dump':
-                    self.handleDump(msg_json)
+                    self.handle_dump(msg_json)
         
         return
 
