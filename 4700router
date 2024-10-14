@@ -61,7 +61,7 @@ class Router:
                 if (self.relations[src] == "peer" or self.relations[src] == "prov") and self.relations[neighbor] == "cust":
                     self.send(neighbor, json.dumps({ 'type': 'update', 'src': self.our_addr(neighbor), 'dst': neighbor,
                     "msg": { 'netmask': netmask, 'ASPath': ASPath, 'network': network } }))
-                    
+
     
     def handle_withdraw(self, msg, msg_json):
         src = msg_json['src']
@@ -151,22 +151,20 @@ class Router:
         if get_func == self.get_true_selfOrigin: return self.get_min_ASPath
         if get_func == self.get_min_ASPath: return self.get_best_origin
         if get_func == self.get_best_origin: return self.get_min_src
-    
+
     def break_tie(self, forward_options, src, dst, msg, get_func):
         new_forward_options = get_func(forward_options)
-        
         if len(new_forward_options) == 1:
-            self.send(new_forward_options[0]['peer'], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
+            return new_forward_options[0]['peer']
         else:
-            self.break_tie((forward_options if len(new_forward_options) == 0 else new_forward_options),
+            return self.break_tie((forward_options if len(new_forward_options) == 0 else new_forward_options),
                            src, dst, msg, self.next_get_func(get_func))
-        
+
     def handle_data(self, msg_json, srcif):
         src = msg_json['src']
         dst = msg_json['dst']
         msg = msg_json['msg']
 
-        #if self.relations[src] == "cust" or self.relations[dst] == "cust":
         forward_options = []
         for entry in self.forwarding_table:
             if entry['network'] == self.mask_network(dst, entry['netmask']):
@@ -175,10 +173,15 @@ class Router:
         if len(forward_options) == 0:
             self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
         elif len(forward_options) == 1:
-            self.send(forward_options[0]['peer'], json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
+            next_hop = forward_options[0]['peer']
         else:
-            self.break_tie(forward_options, src, dst, msg, self.get_max_localpref)
-                    
+            next_hop = self.break_tie(forward_options, src, dst, msg, self.get_max_localpref)
+        
+        if self.relations[srcif] == "cust" or self.relations[next_hop] == "cust":
+            self.send(next_hop, json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
+        else:
+            self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
+
     def handle_dump(self, msg_json):
         dst = msg_json['src']
         src = self.our_addr(dst)
