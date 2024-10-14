@@ -1,0 +1,322 @@
+#!/usr/bin/env -S python3 -u
+
+import argparse, socket, time, json, select, struct, sys, math
+
+class Router:
+
+    relations = {}
+    sockets = {}
+    ports = {}
+    
+    neighbors = []
+    forwarding_table = []
+    aggregated_forwarding_table = []
+    announcements = []
+
+    def __init__(self, asn, connections):
+        print("Router at AS %s starting up" % asn)
+        self.asn = asn
+        for relationship in connections:
+            port, neighbor, relation = relationship.split("-")
+
+            self.neighbors.append(neighbor)
+            self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.sockets[neighbor].bind(('localhost', 0))
+            self.ports[neighbor] = int(port)
+            self.relations[neighbor] = relation
+            self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
+
+    def our_addr(self, dst):
+        quads = list(int(qdn) for qdn in dst.split('.'))
+        quads[3] = 1
+        return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
+
+    def send(self, network, message):
+        self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
+
+    def ip_to_binary(self, ip):
+        packed_ip = socket.inet_aton(ip)
+        binary_ip = ''.join(f'{octet:08b}' for octet in packed_ip)
+        return binary_ip
+
+    def binary_to_ip(self, binary):
+        ip = socket.inet_ntoa(struct.pack('!I', int(binary, 2)))
+        return ip
+    
+    def get_one_count(self, binary):
+        one_count = 0
+        for bit in binary:
+            if bit == '1':
+                one_count+=1
+        return one_count
+    
+    def is_adjacent(self, net_a, net_b):
+        aArr = [int(octet) for octet in net_a.split('.')]
+        bArr = [int(octet) for octet in net_b.split('.')]
+        networkArr = [net_a ^ net_b for net_a, net_b in zip(aArr, bArr)]
+        xor_binary = self.ip_to_binary('.'.join(map(str, networkArr)))
+        print(xor_binary)
+        return self.get_one_count(xor_binary) == 1
+
+    def shorten_netmask(self, netmask):
+        netmask_binary = self.ip_to_binary(netmask)
+        print(netmask_binary[:self.get_one_count(netmask_binary) - 1] +
+                                 '0' + netmask_binary[self.get_one_count(netmask_binary):])
+        return self.binary_to_ip(netmask_binary[:self.get_one_count(netmask_binary) - 1] +
+                                 '0' + netmask_binary[self.get_one_count(netmask_binary):])
+        
+    def aggregate(self, entry):
+        for other in self.forwarding_table:
+            for aggregate in ([other['entry']] + other['aggregates']):
+                if (self.is_adjacent(self.mask_network(entry['network'], entry['netmask']),
+                                     self.mask_network(aggregate['network'], aggregate['netmask'])) &
+                    (entry['peer'] == aggregate['peer']) &
+                    (entry['localpref'] == aggregate['localpref']) &
+                    (entry['selfOrigin'] == aggregate['selfOrigin']) &
+                    (entry['ASPath'] == aggregate['ASPath']) &
+                    (entry['origin'] == aggregate['origin'])):
+                    if (self.get_one_count(self.ip_to_binary(entry['network'])) <
+                        self.get_one_count(self.ip_to_binary(aggregate['network']))):
+                        entry['aggregates'] = entry['aggregates'] + [aggregate]
+                        entry['entry']['netmask'] = self.shorten_netmask(entry['entry']['netmask'])
+                        self.forwarding_table.remove(other)
+                    else:
+                        other['aggregates'] = other['aggregates'] + [entry]
+                        if aggregate == other['entry']:
+                            other['entry']['netmask'] = self.shorten_netmask(other['entry']['netmask'])
+                        to_remove_list = (e for e in self.forwarding_table if e['entry'] == entry)
+                        for item in to_remove_list:
+                            self.forwarding_table.remove(item)
+    
+    def handle_update(self, msg, msg_json):
+        src = msg_json['src']
+        network = msg_json['msg']['network']
+        netmask = msg_json['msg']['netmask']
+        ASPath = [args.asn] + msg_json['msg']['ASPath']
+        
+        entry = {
+            'network': network,
+            'netmask': netmask,
+            'peer': src,
+            'localpref': msg_json['msg']['localpref'],
+            'selfOrigin': msg_json['msg']['selfOrigin'],
+            'ASPath': msg_json['msg']['ASPath'],
+            'origin': msg_json['msg']['origin']
+        }
+
+        self.announcements.append(msg)
+        self.forwarding_table.append({
+            'entry': entry,
+            'aggregates': []
+        })
+        self.aggregate(entry)
+
+        for neighbor in self.neighbors:
+            if neighbor != src:
+                if self.relations[src] == "cust":
+                    self.send(neighbor, json.dumps({ 'type': 'update', 'src': self.our_addr(neighbor), 'dst': neighbor,
+                    "msg": { 'netmask': netmask, 'ASPath': ASPath, 'network': network } }))
+                if (self.relations[src] == "peer" or self.relations[src] == "prov") and self.relations[neighbor] == "cust":
+                    self.send(neighbor, json.dumps({ 'type': 'update', 'src': self.our_addr(neighbor), 'dst': neighbor,
+                    "msg": { 'netmask': netmask, 'ASPath': ASPath, 'network': network } }))
+
+    def lengthen_netmask(self, netmask):
+        netmask_binary = self.ip_to_binary(netmask)
+        return self.binary_to_ip(netmask_binary[:self.get_one_count(netmask_binary)] +
+                                 '1' + netmask_binary[self.get_one_count(netmask_binary) + 1:])
+
+    # def remove_entry(self, entry):
+    #     self.forwarding_table.remove(entry)
+    #     for aggregate in entry['aggregates']:
+    #         self.forwarding_table.append({
+                
+    #         })
+    #     if entry['entry'] in self.aggregated_forwarding_table:
+    #         self.aggregated_forwarding_table.remove(entry)
+    #         for other in self.total_forwarding_table:
+    #             if other['aggregated_to'] == entry:
+    #                 self.aggregated_forwarding_table.append(other['entry'])
+    #                 other['aggregated_to'] = {}
+    #     else:
+    #         in_aggregated_idx = self.aggregated_forwarding_table.index(entry['aggregated_to'])
+    #         in_aggregated = self.aggregated_forwarding_table[in_aggregated_idx]
+    #         in_aggregated['netmask'] = self.lengthen_netmask(in_aggregated['netmask'])
+    
+    def handle_withdraw(self, msg, msg_json):
+        src = msg_json['src']
+        routes_to_remove = msg_json['msg']
+        
+        self.announcements.append(msg)
+        
+        # for entry in self.forwarding_table:
+        #     for route in routes_to_remove:
+        #         if ((entry['entry']['peer'] == src) &
+        #             (entry['entry']['network'] == route['network'])):
+        #             self.remove_entry(entry)
+                    
+        for neighbor in self.neighbors:
+            if neighbor != src:
+                self.send(neighbor, json.dumps({ 'type': 'withdraw', 'src': self.our_addr(neighbor), 'dst': neighbor,
+                "msg": routes_to_remove }))
+    
+    def mask_network(self, to_mask, mask):
+        srcArr = [int(octet) for octet in to_mask.split('.')]
+        maskArr = [int(octet) for octet in mask.split('.')]
+        networkArr = [src & mask for src, mask in zip(srcArr, maskArr)]
+        return '.'.join(map(str, networkArr))
+    
+    def get_longest_prefix(self, forward_options):
+        longest_prefix = 0
+        longest_options = []
+        for option in forward_options:
+            if int(self.ip_to_binary(option['netmask']), 2) > longest_prefix:
+                longest_prefix = int(self.ip_to_binary(option['netmask']), 2)
+                longest_options = [option]
+            elif int(self.ip_to_binary(option['netmask']), 2) == longest_prefix:
+                longest_options.append(option)
+        
+        return longest_options
+    
+    def get_max_localpref(self, forward_options):
+        max_localpref = 0
+        max_options = []
+        for option in forward_options:
+            if option['localpref'] > max_localpref:
+                max_localpref = option['localpref']
+                max_options = [option]
+            elif option['localpref'] == max_localpref:
+                max_options.append(option)
+        
+        return max_options
+    
+    def get_true_selfOrigin(self, forward_options):
+        true_options = []
+        for option in forward_options:
+            if option['selfOrigin']:
+                true_options.append(option)
+        
+        return true_options
+    
+    def get_min_ASPath(self, forward_options):
+        min_ASPath = float('inf')
+        min_options = []
+        for option in forward_options:
+            if len(option['ASPath']) < min_ASPath:
+                min_ASPath = len(option['ASPath'])
+                min_options = [option]
+            elif len(option['ASPath']) == min_ASPath:
+                min_options.append(option)
+                
+        return min_options
+    
+    def origin_to_num(self, origin):
+        if origin == 'IGP': return 3
+        if origin == 'EGP': return 2
+        if origin == 'UNK': return 1
+    
+    def get_best_origin(self, forward_options):
+        best_origin = 0
+        best_options = []
+        for option in forward_options:
+            if self.origin_to_num(option['origin']) > best_origin:
+                best_origin = self.origin_to_num(option['origin'])
+                best_options = [option]
+            elif self.origin_to_num(option['origin']) == best_origin:
+                best_options.append(option)
+                
+        return best_options
+    
+    def get_min_src(self, forward_options):
+        min_src = float('inf')
+        min_options = []
+        for option in forward_options:
+            if float(''.join(option['peer'].split('.'))) < min_src:
+                min_src = int(''.join(option['peer'].split('.')))
+                min_options = [option]
+            elif float(''.join(option['peer'].split('.'))) == min_src:
+                min_options.append(option)
+                
+        return min_options
+    
+    def next_get_func(self, get_func):
+        if get_func == self.get_longest_prefix: return self.get_max_localpref
+        if get_func == self.get_max_localpref: return self.get_true_selfOrigin
+        if get_func == self.get_true_selfOrigin: return self.get_min_ASPath
+        if get_func == self.get_min_ASPath: return self.get_best_origin
+        if get_func == self.get_best_origin: return self.get_min_src
+
+    def break_tie(self, forward_options, get_func):
+        new_forward_options = get_func(forward_options)
+        if len(new_forward_options) == 1:
+            return new_forward_options[0]['peer']
+        else:
+            return self.break_tie((forward_options if len(new_forward_options) == 0 else new_forward_options),
+                                  self.next_get_func(get_func))
+
+    def handle_data(self, msg_json, srcif):
+        src = msg_json['src']
+        dst = msg_json['dst']
+        msg = msg_json['msg']
+
+        forward_options = []
+        for entry in self.forwarding_table:
+            if entry['entry']['network'] == self.mask_network(dst, entry['entry']['netmask']):
+                forward_options.append(entry['entry'])
+
+        if len(forward_options) == 0:
+            self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
+        elif len(forward_options) == 1:
+            next_hop = forward_options[0]['peer']
+        else:
+            next_hop = self.break_tie(forward_options, self.get_longest_prefix)
+        
+        if self.relations[srcif] == "cust" or self.relations[next_hop] == "cust":
+            self.send(next_hop, json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
+        else:
+            self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
+
+    def handle_dump(self, msg_json):
+        dst = msg_json['src']
+        src = self.our_addr(dst)
+        msg = []
+        
+        for entry in self.forwarding_table:
+            msg.append(entry['entry'])
+        
+        self.send(dst, json.dumps({ 'type': 'table', 'src': src, 'dst': dst, 'msg': msg }))
+
+    def run(self):
+        while True:
+            socks = select.select(self.sockets.values(), [], [], 0.1)[0]
+            for conn in socks:
+                k, addr = conn.recvfrom(65535)
+                srcif = None
+                for sock in self.sockets:
+                    if self.sockets[sock] == conn:
+                        srcif = sock
+                        break
+                msg = k.decode('utf-8')
+                
+                print("Received message '%s' from %s" % (msg, srcif))
+
+                msg_json = json.loads(msg)
+                msg_type = msg_json["type"]
+                
+                if msg_type == 'update':
+                    self.handle_update(msg, msg_json)
+                if msg_type == 'withdraw':
+                    self.handle_withdraw(msg, msg_json)
+                if msg_type == 'data':
+                    self.handle_data(msg_json, srcif)
+                if msg_type == 'dump':
+                    self.handle_dump(msg_json)
+        
+        return
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='route packets')
+    parser.add_argument('asn', type=int, help="AS number of this router")
+    parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")
+    args = parser.parse_args()
+    router = Router(args.asn, args.connections)
+    router.run()
