@@ -36,6 +36,15 @@ class Router:
     #def handle_handshake(msg_json, fowarding_table):
         #self.fowarding_table[msg_json['src']] = msg_json['dst']
 
+    def ip_to_binary(ip):
+        packed_ip = socket.inet_aton(ip)
+        binary_ip = ''.join(f'{octet:08b}' for octet in packed_ip)
+        return binary_ip
+
+    def binary_to_ip(binary):
+        ip = socket.inet_ntoa(struct.pack('!I', int(binary, 2)))
+        return ip
+    
     def handle_update(self, msg, msg_json):
         src = msg_json['src']
         network = msg_json['msg']['network']
