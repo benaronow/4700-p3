@@ -3,6 +3,10 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 class Router:
+    """
+    A BGP router which manages how json 'packets' are routed
+    between autonomous systems.
+    """
 
     relations = {}
     sockets = {}
@@ -14,6 +18,9 @@ class Router:
     announcements = []
 
     def __init__(self, asn, connections):
+        """
+        Establishes router's connection with neighbors and sends handshake.
+        """
         print("Router at AS %s starting up" % asn)
         self.asn = asn
         for relationship in connections:
@@ -27,29 +34,48 @@ class Router:
             self.send(neighbor, json.dumps({ "type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}  }))
 
     def our_addr(self, dst):
+        """
+        Given a destination IP, determines the IP for this router, which
+        follows the form of ...1
+        """
         quads = list(int(qdn) for qdn in dst.split('.'))
         quads[3] = 1
         return "%d.%d.%d.%d" % (quads[0], quads[1], quads[2], quads[3])
 
     def send(self, network, message):
+        """
+        Encodes and sends given message on given network.
+        """
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
     def ip_to_binary(self, ip):
+        """
+        Converts the given IP string to its binary form in a string.
+        """
         packed_ip = socket.inet_aton(ip)
         binary_ip = ''.join(f'{octet:08b}' for octet in packed_ip)
         return binary_ip
 
     def binary_to_ip(self, binary):
+        """
+        Converts binary string to IP string.
+        """
         ip = socket.inet_ntoa(struct.pack('!I', int(binary, 2)))
         return ip
     
     def get_one_count(self, binary):
+        """
+        Counts the number of 1 bits in binary number.
+        """
         one_count = 0
         for bit in binary:
             if bit == '1': one_count+=1
         return one_count
     
     def get_rev_zero_count(self, binary):
+        """
+        Counts the num of zeroes in the given binary number.
+        """
         zero_count = 0
         for i in range(len(binary)):
             if binary[len(binary) - i - 1] == '0': zero_count+=1
@@ -57,6 +83,9 @@ class Router:
         return zero_count
     
     def is_adjacent(self, net_a, net_b):
+        """
+        Determines if two networks are numerically adjacent.
+        """
         a_arr = [int(octet) for octet in net_a.split('.')]
         b_arr = [int(octet) for octet in net_b.split('.')]
         network_arr = [net_a ^ net_b for net_a, net_b in zip(a_arr, b_arr)]
@@ -69,6 +98,13 @@ class Router:
                 ((xor_last == a_last) | (xor_last == b_last)))
     
     def shouldAggregate(self, net_a, net_b):
+        """
+        Determines if two networks can be aggregated with the following
+        requirements:
+            1. adjacent numerically
+            2. forward to the same next-hop router
+            3. have the same attributes (e.g., localpref, origin, etc.)
+        """
         return (self.is_adjacent(self.mask_network(net_a['network'], net_a['netmask']),
                                  self.mask_network(net_b['network'], net_b['netmask'])) &
                 (net_a['peer'] == net_b['peer']) &
@@ -78,11 +114,19 @@ class Router:
                 (net_a['origin'] == net_b['origin']))
 
     def shorten_netmask(self, netmask):
+        """
+        Decreases the given netmask by 1
+        """
         netmask_binary = self.ip_to_binary(netmask)
         return self.binary_to_ip(netmask_binary[:self.get_one_count(netmask_binary) - 1] +
                                  '0' + netmask_binary[self.get_one_count(netmask_binary):])
         
     def aggregate_table(self):
+        """
+        Aggregates all entries in the forwarding table that should be
+        aggregated. Then, assigns the new forwarding table to aggregated_forwarding_table
+        variable.
+        """
         new_forwarding_table = []
         
         for entry in self.forwarding_table:
@@ -110,6 +154,12 @@ class Router:
         self.aggregated_forwarding_table = new_forwarding_table
     
     def handle_update(self, msg, msg_json):
+        """
+        Handles update messages sent to this router.
+        - Update received from a customer: send updates to all other neighbors
+        - Update received from a peer or a provider: only send updates to your customers
+        Aggregates table after each update.
+        """
         src = msg_json['src']
         network = msg_json['msg']['network']
         netmask = msg_json['msg']['netmask']
@@ -139,11 +189,21 @@ class Router:
                     "msg": { 'netmask': netmask, 'ASPath': ASPath, 'network': network } }))
 
     def lengthen_netmask(self, netmask):
+        """
+        Increases the given netmask by 1.
+        """
         netmask_binary = self.ip_to_binary(netmask)
         return self.binary_to_ip(netmask_binary[:self.get_one_count(netmask_binary)] +
                                  '1' + netmask_binary[self.get_one_count(netmask_binary) + 1:])
     
     def handle_withdraw(self, msg, msg_json):
+        """
+        Handles withdraw messages, saving a copy of revocation,
+        removing the dead entry, and possibly sending copies of the 
+        revocation to other neighbors.
+
+        Aggregates table after each withdrawal.
+        """
         src = msg_json['src']
         routes_to_remove = msg_json['msg']
         
@@ -164,12 +224,18 @@ class Router:
                 "msg": routes_to_remove }))
     
     def mask_network(self, to_mask, mask):
+        """
+        Masks the given network with given netmask.
+        """
         srcArr = [int(octet) for octet in to_mask.split('.')]
         maskArr = [int(octet) for octet in mask.split('.')]
         networkArr = [src & mask for src, mask in zip(srcArr, maskArr)]
         return '.'.join(map(str, networkArr))
     
     def get_longest_prefix(self, forward_options):
+        """
+        Determines the longest prefix options from the forwarding table options.
+        """
         longest_prefix = 0
         longest_options = []
         for option in forward_options:
@@ -182,6 +248,9 @@ class Router:
         return longest_options
     
     def get_max_localpref(self, forward_options):
+        """
+        Determines the forwarding options with the max localpref.
+        """
         max_localpref = 0
         max_options = []
         for option in forward_options:
@@ -194,6 +263,9 @@ class Router:
         return max_options
     
     def get_true_selfOrigin(self, forward_options):
+        """
+        Determines which forwarding options have selfOrigin.
+        """
         true_options = []
         for option in forward_options:
             if option['selfOrigin']:
@@ -202,6 +274,9 @@ class Router:
         return true_options
     
     def get_min_ASPath(self, forward_options):
+        """
+        Determines the forwarding options with the minimum ASPath.
+        """
         min_ASPath = float('inf')
         min_options = []
         for option in forward_options:
@@ -214,11 +289,23 @@ class Router:
         return min_options
     
     def origin_to_num(self, origin):
+        """
+        Ranks the given origin from 1-3. 
+
+        “Origin” describes whether this route originated from a
+        router within the local AS (IGP), a remote AS (EGP),
+        or an unknown origin (UNK).
+        
+        The preference order is IGP > EGP > UNK.
+        """
         if origin == 'IGP': return 3
         if origin == 'EGP': return 2
         if origin == 'UNK': return 1
     
     def get_best_origin(self, forward_options):
+        """
+        Determines the forward options with the best origins.
+        """
         best_origin = 0
         best_options = []
         for option in forward_options:
@@ -231,6 +318,9 @@ class Router:
         return best_options
     
     def get_min_src(self, forward_options):
+        """
+        Determines the forwarding options minimum src.
+        """
         min_src = float('inf')
         min_options = []
         for option in forward_options:
@@ -243,6 +333,9 @@ class Router:
         return min_options
     
     def next_get_func(self, get_func):
+        """
+        Given the current get function determine the next get function to look for.
+        """
         if get_func == self.get_longest_prefix: return self.get_max_localpref
         if get_func == self.get_max_localpref: return self.get_true_selfOrigin
         if get_func == self.get_true_selfOrigin: return self.get_min_ASPath
@@ -250,6 +343,9 @@ class Router:
         if get_func == self.get_best_origin: return self.get_min_src
 
     def break_tie(self, forward_options, get_func):
+        """
+        Given several forward options, return the appropriate next hop.
+        """
         new_forward_options = get_func(forward_options)
         if len(new_forward_options) == 1:
             return new_forward_options[0]['peer']
@@ -258,6 +354,14 @@ class Router:
                                   self.next_get_func(get_func))
 
     def handle_data(self, msg_json, srcif):
+        """
+        Handles data messages for the router. Follows below requirements:
+            1. The entry with the highest localpref wins. If the localprefs are equal…
+            2. The entry with selfOrigin as true wins. If all selfOrigins are the equal…
+            3. The entry with the shortest ASPath wins. If multiple entries have the shortest length…
+            4. The entry with the best origin wins, where IGP > EGP > UNK. If multiple entries have the best origin…
+            5. The entry from the neighbor router (i.e., the src of the update message) with the lowest IP address.
+        """
         src = msg_json['src']
         dst = msg_json['dst']
         msg = msg_json['msg']
@@ -280,6 +384,9 @@ class Router:
                 self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
 
     def handle_dump(self, msg_json):
+        """
+        Handles dump messages, updating aggregated forwarding table and sending table message.
+        """
         dst = msg_json['src']
         src = self.our_addr(dst)
         msg = []
@@ -290,6 +397,10 @@ class Router:
         self.send(dst, json.dumps({ 'type': 'table', 'src': src, 'dst': dst, 'msg': msg }))
 
     def run(self):
+        """
+        Runs this router receiving and sending messages--handling all update, withdrawal, data, and dump
+        messages appropriately.
+        """
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
             for conn in socks:
