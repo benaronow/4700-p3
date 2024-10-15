@@ -46,47 +46,68 @@ class Router:
     def get_one_count(self, binary):
         one_count = 0
         for bit in binary:
-            if bit == '1':
-                one_count+=1
+            if bit == '1': one_count+=1
         return one_count
     
+    def get_rev_zero_count(self, binary):
+        zero_count = 0
+        for i in range(len(binary)):
+            if binary[len(binary) - i - 1] == '0': zero_count+=1
+            else: break
+        return zero_count
+    
     def is_adjacent(self, net_a, net_b):
-        aArr = [int(octet) for octet in net_a.split('.')]
-        bArr = [int(octet) for octet in net_b.split('.')]
-        networkArr = [net_a ^ net_b for net_a, net_b in zip(aArr, bArr)]
-        xor_binary = self.ip_to_binary('.'.join(map(str, networkArr)))
-        print(xor_binary)
-        return self.get_one_count(xor_binary) == 1
+        a_arr = [int(octet) for octet in net_a.split('.')]
+        b_arr = [int(octet) for octet in net_b.split('.')]
+        network_arr = [net_a ^ net_b for net_a, net_b in zip(a_arr, b_arr)]
+        xor_binary = self.ip_to_binary('.'.join(map(str, network_arr)))
+        a_last = len(self.ip_to_binary(net_a)) - self.get_rev_zero_count(self.ip_to_binary(net_a)) - 1
+        b_last = len(self.ip_to_binary(net_b)) - self.get_rev_zero_count(self.ip_to_binary(net_b)) - 1
+        if '1' in xor_binary: xor_last = xor_binary.index('1')
+        else: xor_last = -1
+        return ((self.get_one_count(xor_binary) == 1) &
+                ((xor_last == a_last) | (xor_last == b_last)))
+    
+    def shouldAggregate(self, net_a, net_b):
+        return (self.is_adjacent(self.mask_network(net_a['network'], net_a['netmask']),
+                                 self.mask_network(net_b['network'], net_b['netmask'])) &
+                (net_a['peer'] == net_b['peer']) &
+                (net_a['localpref'] == net_b['localpref']) &
+                (net_a['selfOrigin'] == net_b['selfOrigin']) &
+                (net_a['ASPath'] == net_b['ASPath']) &
+                (net_a['origin'] == net_b['origin']))
 
     def shorten_netmask(self, netmask):
         netmask_binary = self.ip_to_binary(netmask)
-        print(netmask_binary[:self.get_one_count(netmask_binary) - 1] +
-                                 '0' + netmask_binary[self.get_one_count(netmask_binary):])
         return self.binary_to_ip(netmask_binary[:self.get_one_count(netmask_binary) - 1] +
                                  '0' + netmask_binary[self.get_one_count(netmask_binary):])
         
-    def aggregate(self, entry):
-        for other in self.forwarding_table:
-            for aggregate in ([other['entry']] + other['aggregates']):
-                if (self.is_adjacent(self.mask_network(entry['network'], entry['netmask']),
-                                     self.mask_network(aggregate['network'], aggregate['netmask'])) &
-                    (entry['peer'] == aggregate['peer']) &
-                    (entry['localpref'] == aggregate['localpref']) &
-                    (entry['selfOrigin'] == aggregate['selfOrigin']) &
-                    (entry['ASPath'] == aggregate['ASPath']) &
-                    (entry['origin'] == aggregate['origin'])):
-                    if (self.get_one_count(self.ip_to_binary(entry['network'])) <
-                        self.get_one_count(self.ip_to_binary(aggregate['network']))):
-                        entry['aggregates'] = entry['aggregates'] + [aggregate]
-                        entry['entry']['netmask'] = self.shorten_netmask(entry['entry']['netmask'])
-                        self.forwarding_table.remove(other)
+    def aggregate_table(self):
+        new_forwarding_table = []
+        
+        for entry in self.forwarding_table:
+            should_aggregate = True
+            for other in new_forwarding_table:
+                if self.shouldAggregate(entry['self'], other['self']):
+                    should_aggregate = False
+                    if (self.get_one_count(self.ip_to_binary(entry['self']['network'])) <
+                        self.get_one_count(self.ip_to_binary(other['self']['network']))):
+                        entry['self']['netmask'] = self.shorten_netmask(entry['self']['netmask'])
+                        entry['aggregates'].append(other['self'])
+                        new_forwarding_table.append({ 'self': entry['self'].copy(), 'aggregates': entry['aggregates'].copy() })
+                        new_forwarding_table.remove(other)
                     else:
-                        other['aggregates'] = other['aggregates'] + [entry]
-                        if aggregate == other['entry']:
-                            other['entry']['netmask'] = self.shorten_netmask(other['entry']['netmask'])
-                        to_remove_list = (e for e in self.forwarding_table if e['entry'] == entry)
-                        for item in to_remove_list:
-                            self.forwarding_table.remove(item)
+                        other['aggregates'].append(entry['self'])
+                        other['self']['netmask'] = self.shorten_netmask(other['self']['netmask'])
+                else:
+                    for aggregate in other['aggregates']:
+                        if self.shouldAggregate(entry['self'], aggregate):
+                            should_aggregate = False
+                
+            if (should_aggregate):
+                new_forwarding_table.append({ 'self': entry['self'].copy(), 'aggregates': entry['aggregates'].copy() })
+        
+        self.aggregated_forwarding_table = new_forwarding_table
     
     def handle_update(self, msg, msg_json):
         src = msg_json['src']
@@ -105,11 +126,8 @@ class Router:
         }
 
         self.announcements.append(msg)
-        self.forwarding_table.append({
-            'entry': entry,
-            'aggregates': []
-        })
-        self.aggregate(entry)
+        self.forwarding_table.append({ 'self': entry, 'aggregates': [] })
+        self.aggregate_table()
 
         for neighbor in self.neighbors:
             if neighbor != src:
@@ -124,23 +142,6 @@ class Router:
         netmask_binary = self.ip_to_binary(netmask)
         return self.binary_to_ip(netmask_binary[:self.get_one_count(netmask_binary)] +
                                  '1' + netmask_binary[self.get_one_count(netmask_binary) + 1:])
-
-    # def remove_entry(self, entry):
-    #     self.forwarding_table.remove(entry)
-    #     for aggregate in entry['aggregates']:
-    #         self.forwarding_table.append({
-                
-    #         })
-    #     if entry['entry'] in self.aggregated_forwarding_table:
-    #         self.aggregated_forwarding_table.remove(entry)
-    #         for other in self.total_forwarding_table:
-    #             if other['aggregated_to'] == entry:
-    #                 self.aggregated_forwarding_table.append(other['entry'])
-    #                 other['aggregated_to'] = {}
-    #     else:
-    #         in_aggregated_idx = self.aggregated_forwarding_table.index(entry['aggregated_to'])
-    #         in_aggregated = self.aggregated_forwarding_table[in_aggregated_idx]
-    #         in_aggregated['netmask'] = self.lengthen_netmask(in_aggregated['netmask'])
     
     def handle_withdraw(self, msg, msg_json):
         src = msg_json['src']
@@ -148,11 +149,14 @@ class Router:
         
         self.announcements.append(msg)
         
-        # for entry in self.forwarding_table:
-        #     for route in routes_to_remove:
-        #         if ((entry['entry']['peer'] == src) &
-        #             (entry['entry']['network'] == route['network'])):
-        #             self.remove_entry(entry)
+        for entry in self.forwarding_table:
+            for route in routes_to_remove:
+                if ((entry['self']['peer'] == src) &
+                    (entry['self']['network'] == route['network']) &
+                    (entry['self']['netmask'] == route['netmask'])):
+                    self.forwarding_table.remove(entry)
+        
+        self.aggregate_table()
                     
         for neighbor in self.neighbors:
             if neighbor != src:
@@ -259,29 +263,29 @@ class Router:
         msg = msg_json['msg']
 
         forward_options = []
-        for entry in self.forwarding_table:
-            if entry['entry']['network'] == self.mask_network(dst, entry['entry']['netmask']):
-                forward_options.append(entry['entry'])
+        for entry in self.aggregated_forwarding_table:
+            if entry['self']['network'] == self.mask_network(dst, entry['self']['netmask']):
+                forward_options.append(entry['self'])
 
         if len(forward_options) == 0:
             self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
-        elif len(forward_options) == 1:
-            next_hop = forward_options[0]['peer']
         else:
-            next_hop = self.break_tie(forward_options, self.get_longest_prefix)
-        
-        if self.relations[srcif] == "cust" or self.relations[next_hop] == "cust":
-            self.send(next_hop, json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
-        else:
-            self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
+            if len(forward_options) == 1:
+                next_hop = forward_options[0]['peer']
+            else:
+                next_hop = self.break_tie(forward_options, self.get_longest_prefix)
+            if self.relations[srcif] == "cust" or self.relations[next_hop] == "cust":
+                self.send(next_hop, json.dumps({ 'type': 'data', 'src': src, 'dst': dst, 'msg': msg}))
+            else:
+                self.send(srcif, json.dumps({ 'type': 'no route', 'src': self.our_addr(src), 'dst': src}))
 
     def handle_dump(self, msg_json):
         dst = msg_json['src']
         src = self.our_addr(dst)
         msg = []
         
-        for entry in self.forwarding_table:
-            msg.append(entry['entry'])
+        for entry in self.aggregated_forwarding_table:
+            msg.append(entry['self'])
         
         self.send(dst, json.dumps({ 'type': 'table', 'src': src, 'dst': dst, 'msg': msg }))
 
